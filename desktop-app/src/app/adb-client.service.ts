@@ -530,10 +530,13 @@ This can sometimes be caused by changes to your hosts file. Don't make changes u
             .trim();
     }
     getPackageLocation(packageName) {
-        return this.adbCommand('shell', { serial: this.deviceSerial, command: 'pm list packages -f ' + packageName }).then(res => {
-            let parts = res.split(':');
-            if (parts.length > 1) {
-                return parts[1].split('base.apk=')[0] + 'base.apk';
+        return this.adbCommand('shell', { serial: this.deviceSerial, command: 'pm path ' + packageName }).then(res => {
+            let parts = res
+                .split('\n')
+                .filter(part => part)
+                .map(part => part.split(':')[1]);
+            if (parts.length > 0) {
+                return parts;
             } else {
                 return false;
             }
@@ -552,7 +555,7 @@ This can sometimes be caused by changes to your hosts file. Don't make changes u
         return this.appService.fs
             .readdirSync(backupPath)
             .map(file => this.appService.path.join(backupPath, file))
-            .filter(file => !this.appService.fs.lstatSync(file).isDirectory() && this.appService.path.extname(file) === '.apk')
+            .filter(file => this.appService.fs.lstatSync(file).isDirectory() || this.appService.path.extname(file) === '.apk')
             .reverse();
     }
     async getDataBackups(packageName: string) {
@@ -564,40 +567,93 @@ This can sometimes be caused by changes to your hosts file. Don't make changes u
             .filter(folder => this.appService.fs.lstatSync(folder).isDirectory())
             .reverse();
     }
-    async backupPackage(apkPath, packageName) {
-        return this.processService.addItem('backup_package', async task => {
-            task.status = packageName + ' backing up... 0MB';
-            this.isTransferring = true;
-            let version: string;
-            try {
-                version = await this.getAppVersionCode(packageName);
-                version = version.replace(/(\r\n|\n|\r)/gm, '');
-            } catch (e) {
-                this.statusService.showStatus(e.message ? e.message : e.toString(), true);
-                return Promise.reject('APK not found, is the app installed? ' + packageName);
-            }
-            const savePath = this.appService.path.join(
-                this.appService.backupPath,
-                packageName,
-                'apks',
-                this.getFilenameDate() + '_' + version + '.apk'
-            );
-            return this.makeBackupFolders(packageName)
-                .then(() =>
-                    this.adbCommand('pull', { serial: this.deviceSerial, path: apkPath, savePath: savePath }, stats => {
-                        task.status = packageName + ' backing up... ' + Math.round(stats.bytesTransferred / 1024 / 1024) + 'MB';
+    async backupPackage(apkPaths, packageName) {
+        if (apkPaths.length > 1) {
+            return this.processService.addItem('backup_package', async task => {
+                task.status = packageName + ' backing up... 0MB';
+                this.isTransferring = true;
+                let version: string;
+                try {
+                    version = await this.getAppVersionCode(packageName);
+                    version = version.replace(/(\r\n|\n|\r)/gm, '');
+                } catch (e) {
+                    this.statusService.showStatus(e.message ? e.message : e.toString(), true);
+                    return Promise.reject('APK not found, is the app installed? ' + packageName);
+                }
+                const savePath = this.appService.path.join(
+                    this.appService.backupPath,
+                    packageName,
+                    'apks',
+                    this.getFilenameDate() + '_' + version
+                );
+                let chain = this.makeBackupFolders(packageName).then(() => this.appService.mkdir(savePath));
+                for (let i = 0; i < apkPaths.length; i++) {
+                    chain = chain.then(() => {
+                        const savePathApk = this.appService.path.join(savePath, this.appService.path.basename(apkPaths[i]));
+                        return this.adbCommand(
+                            'pull',
+                            { serial: this.deviceSerial, path: apkPaths[i], savePath: savePathApk },
+                            stats => {
+                                task.status =
+                                    packageName +
+                                    ' ' +
+                                    i +
+                                    '/' +
+                                    apkPaths.length +
+                                    ' backing up... ' +
+                                    Math.round(stats.bytesTransferred / 1024 / 1024) +
+                                    'MB';
+                            }
+                        );
+                    });
+                }
+                chain = chain
+                    .then(() => {
+                        this.isTransferring = false;
+                        task.status = packageName + ' backed up to ' + this.appService.path.basename(savePath) + ' successfully!!';
+                        return savePath;
                     })
-                )
-                .then(() => {
-                    this.isTransferring = false;
-                    task.status = packageName + ' backed up to ' + this.appService.path.basename(savePath) + ' successfully!!';
-                    return savePath;
-                })
-                .catch(e => {
-                    this.isTransferring = false;
-                    return Promise.reject(packageName + ' backup failed: ' + e.message ? e.message : e.toString());
-                });
-        });
+                    .catch(e => {
+                        this.isTransferring = false;
+                        return Promise.reject(packageName + ' backup failed: ' + e.message ? e.message : e.toString());
+                    });
+                return chain;
+            });
+        } else {
+            return this.processService.addItem('backup_package', async task => {
+                task.status = packageName + ' backing up... 0MB';
+                this.isTransferring = true;
+                let version: string;
+                try {
+                    version = await this.getAppVersionCode(packageName);
+                    version = version.replace(/(\r\n|\n|\r)/gm, '');
+                } catch (e) {
+                    this.statusService.showStatus(e.message ? e.message : e.toString(), true);
+                    return Promise.reject('APK not found, is the app installed? ' + packageName);
+                }
+                const savePath = this.appService.path.join(
+                    this.appService.backupPath,
+                    packageName,
+                    'apks',
+                    this.getFilenameDate() + '_' + version + '.apk'
+                );
+                return this.makeBackupFolders(packageName)
+                    .then(() =>
+                        this.adbCommand('pull', { serial: this.deviceSerial, path: apkPaths[0], savePath: savePath }, stats => {
+                            task.status = packageName + ' backing up... ' + Math.round(stats.bytesTransferred / 1024 / 1024) + 'MB';
+                        })
+                    )
+                    .then(() => {
+                        this.isTransferring = false;
+                        task.status = packageName + ' backed up to ' + this.appService.path.basename(savePath) + ' successfully!!';
+                        return savePath;
+                    })
+                    .catch(e => {
+                        this.isTransferring = false;
+                        return Promise.reject(packageName + ' backup failed: ' + e.message ? e.message : e.toString());
+                    });
+            });
+        }
     }
     installAPK(
         filePath: string,
@@ -612,28 +668,93 @@ This can sometimes be caused by changes to your hosts file. Don't make changes u
             'apk_install',
             task => {
                 if (this.deviceStatus !== ConnectionStatus.CONNECTED) {
-                    return Promise.reject(name + 'Apk install failed - No device connected!');
+                    return Promise.reject(name + ' Apk install failed - No device connected!');
                 }
                 const showTotal = number && total ? '(' + number + '/' + total + ') ' : '';
                 task.show_total = showTotal;
                 task.app_name = name || '';
                 task.status = name + showTotal + 'Installing Apk... ';
-                return this.adbCommand('install', { serial: this.deviceSerial, path: filePath, isLocal: !!isLocal }, status => {
-                    if (status.percent && status.size && status.time) {
-                        task.status =
-                            status.percent === 1
-                                ? name + showTotal + 'Installing Apk...'
-                                : name + showTotal + 'Downloading APK... ' + Math.round(status.percent * 100) + '% ';
-                    } else {
-                        if (status === 'Checking APK against blacklist...') {
-                            task.status = name + showTotal + status;
-                        } else {
-                            task.status = name + showTotal + 'Installing Apk...';
-                        }
-                    }
-                })
+                let files;
+                if (this.appService.fs.lstatSync(filePath).isDirectory()) {
+                    files = this.appService.fs
+                        .readdirSync(filePath)
+                        .map(file => {
+                            const name = this.appService.path.join(filePath, file);
+                            return {
+                                name: name,
+                                savePath: this.appService.path.posix.join('/data', 'local', 'tmp', file),
+                                size: this.appService.fs.lstatSync(name).size,
+                            };
+                        })
+                        .filter(
+                            file =>
+                                this.appService.fs.lstatSync(file.name).isFile() &&
+                                this.appService.path.extname(file.name) === '.apk'
+                        );
+                } else {
+                    files = [
+                        {
+                            name: filePath,
+                            savePath: this.appService.path.posix.join(
+                                '/data',
+                                'local',
+                                'tmp',
+                                this.appService.path.basename(filePath)
+                            ),
+                            size: this.appService.fs.lstatSync(filePath).size,
+                        },
+                    ];
+                }
+                let totalSize = files.reduce((previousValue, currentValue) => previousValue + currentValue.size, 0);
+                let uploadFiles = Array.from(files);
+                return this.uploadFile(uploadFiles, task)
+                    .then(() =>
+                        this.adbCommand('shell', {
+                            serial: this.deviceSerial,
+                            command: 'pm install-create -S ' + totalSize,
+                        }).then(r => {
+                            try {
+                                const sessionId = r.split('[')[1].split(']')[0];
+                            } catch {
+                                throw new Error(r);
+                            }
+                            const sessionId = r.split('[')[1].split(']')[0];
+                            let chain = Promise.resolve();
+                            for (let i = 0; i < files.length; i++) {
+                                let file = files[i];
+                                chain = chain.then(r => {
+                                    return this.adbCommand('shell', {
+                                        serial: this.deviceSerial,
+                                        command:
+                                            'pm install-write -S ' +
+                                            file.size +
+                                            ' ' +
+                                            sessionId +
+                                            ' ' +
+                                            i +
+                                            ' "' +
+                                            file.savePath +
+                                            '"',
+                                    });
+                                });
+                            }
+                            chain = chain.then(r => {
+                                return this.adbCommand('shell', {
+                                    serial: this.deviceSerial,
+                                    command: 'pm install-commit ' + sessionId,
+                                });
+                            });
+                            return chain;
+                        })
+                    )
                     .then(r => {
-                        task.status = name + 'APK installed ok!!';
+                        if (r.startsWith('Success')) {
+                            return;
+                        }
+                        throw new Error(r);
+                    })
+                    .then(r => {
+                        task.status = name + ' APK installed ok!!';
                         if (deleteAfter) {
                             this.appService.fs.unlink(filePath, err => {});
                         }
